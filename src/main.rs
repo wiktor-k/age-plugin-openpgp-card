@@ -136,14 +136,19 @@ impl IdentityPluginV1 for IdentityPlugin {
         // A failure to decrypt is non-fatal (we try to decrypt the recipient
         // stanza with other X25519 keys), because we cannot tell which key
         // matches a particular stanza.
-        aead_decrypt(&enc_key, FILE_KEY_BYTES, &encrypted_file_key)
+        let result = aead_decrypt(&enc_key, FILE_KEY_BYTES, &encrypted_file_key)
             .ok()
             .map(|mut pt| {
                 // It's ours!
                 let file_key: [u8; FILE_KEY_BYTES] = pt[..].try_into().unwrap();
-                pt.zeroize();
-                Ok(file_key.into())
+                //pt.zeroize();
+                Ok(FileKey::from(file_key))
             })
+            .unwrap();
+
+        let mut map = HashMap::new();
+        map.insert(0, result);
+        Ok(map) //result
     }
 }
 
