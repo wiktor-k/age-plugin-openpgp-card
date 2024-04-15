@@ -5,7 +5,9 @@ use age_plugin::{
     recipient::{self, RecipientPluginV1},
     run_state_machine, Callbacks,
 };
+use card_backend_pcsc::PcscBackend;
 use clap::Parser;
+use openpgp_card::Card;
 
 use std::collections::HashMap;
 use std::io;
@@ -57,7 +59,7 @@ impl IdentityPluginV1 for IdentityPlugin {
         files: Vec<Vec<Stanza>>,
         mut callbacks: impl Callbacks<identity::Error>,
     ) -> io::Result<HashMap<usize, Result<FileKey, Vec<identity::Error>>>> {
-        todo!()
+        panic!()
     }
 }
 
@@ -82,5 +84,17 @@ fn main() -> io::Result<()> {
     // Here you can assume the binary is being run directly by a user,
     // and perform administrative tasks like generating keys.
 
+    Ok(())
+}
+
+fn decrypt() -> Result<(), Box<dyn std::error::Error>> {
+    for backend in PcscBackend::cards(None)? {
+        let mut card = Card::new(backend?)?;
+        let mut tx = card.transaction()?;
+        //tx.application_related_data()?;
+        tx.verify_pw1_user(&"12345".as_bytes())?;
+        tx.decipher(openpgp_card::crypto_data::Cryptogram::ECDH())
+        //
+    }
     Ok(())
 }
