@@ -5,11 +5,11 @@ use age_plugin::{
     recipient::{self, RecipientPluginV1},
     run_state_machine, Callbacks,
 };
-
 use card_backend_pcsc::PcscBackend;
 use clap::Parser;
 use openpgp_card::Card;
-use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
+use subtle::ConstantTimeEq;
+use x25519_dalek::{EphemeralSecret, PublicKey};
 
 use std::collections::HashMap;
 use std::io;
@@ -90,7 +90,7 @@ impl IdentityPluginV1 for IdentityPlugin {
         files: Vec<Vec<Stanza>>,
         mut callbacks: impl Callbacks<identity::Error>,
     ) -> io::Result<HashMap<usize, Result<FileKey, Vec<identity::Error>>>> {
-        let stanza = files[0][0];
+        let stanza = &files[0][0];
         if stanza.tag != X25519_RECIPIENT_TAG {
             panic!("return None;");
         }
@@ -113,10 +113,11 @@ impl IdentityPluginV1 for IdentityPlugin {
             .try_into()
             .expect("Length should have been checked above");
 
-        let pk: PublicKey = (&self.0).into();
-        let shared_secret = self.0.diffie_hellman(&epk);
-        // Replace with `SharedSecret::was_contributory` once x25519-dalek supports newer
-        // zeroize (https://github.com/dalek-cryptography/x25519-dalek/issues/74#issuecomment-1159481280).
+        //        let pk: PublicKey = (&self.0).into();
+        let pk = "test";
+        let shared_secret = "test"; //self.0.diffie_hellman(&epk);
+                                    // Replace with `SharedSecret::was_contributory` once x25519-dalek supports newer
+                                    // zeroize (https://github.com/dalek-cryptography/x25519-dalek/issues/74#issuecomment-1159481280).
         if shared_secret
             .as_bytes()
             .iter()
@@ -182,7 +183,7 @@ fn decrypt() -> Result<(), Box<dyn std::error::Error>> {
         let mut tx = card.transaction()?;
         //tx.application_related_data()?;
         tx.verify_pw1_user(&"12345".as_bytes())?;
-        tx.decipher(openpgp_card::crypto_data::Cryptogram::ECDH())
+        //tx.decipher(openpgp_card::crypto_data::Cryptogram::ECDH())
         //
     }
     Ok(())

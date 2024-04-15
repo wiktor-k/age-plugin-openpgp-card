@@ -52,6 +52,7 @@ dependencies = [
  "card-backend-pcsc",
  "clap",
  "openpgp-card",
+ "subtle",
  "x25519-dalek",
 ]
 

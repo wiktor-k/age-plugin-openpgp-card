@@ -12,4 +12,5 @@ base64 = "0.22.0"
 card-backend-pcsc = "0.5.0"
 clap = { version = "4.5.4", features = ["derive"] }
 openpgp-card = "0.4.2"
+subtle = "2.5.0"
 x25519-dalek = "2.0.1"
