@@ -7,6 +7,7 @@ license = "Apache-2.0 OR MIT"
 keywords = ["age", "cli", "encryption", "openpgp", "yubikey"]
 categories = ["command-line-utilities", "cryptography"]
 authors = ["Wiktor Kwapisiewicz <wiktor@metacode.biz>"]
+repository = "https://github.com/wiktor-k/age-plugin-openpgp-card"
 
 [dependencies]
 age-core = "0.10.0"

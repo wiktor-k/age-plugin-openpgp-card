@@ -1,5 +1,8 @@
 # Age Plugin: OpenPGP Card
 
+[![CI](https://github.com/wiktor-k/age-plugin-openpgp-card/actions/workflows/rust.yml/badge.svg)](https://github.com/wiktor-k/age-plugin-openpgp-card/actions/workflows/rust.yml)
+[![Crates.io](https://img.shields.io/crates/v/age-plugin-openpgp-card)](https://crates.io/crates/age-plugin-openpgp-card)
+
 This age plugin allows you to reuse your OpenPGP Card devices (such as Yubikeys or Nitrokeys) for [age decryption](https://age-encryption.org/).
 
 Why? [OpenPGP Card](https://en.wikipedia.org/wiki/OpenPGP_card), contrary to its name, is just a generic cryptographic device but most importantly the spec and the real-world devices (e.g. Yubikeys) in the wild [support ed25519](https://docs.yubico.com/hardware/yubikey/yk-tech-manual/yk5-apps.html#elliptic-curve-cryptographic-ecc-algorithms).
