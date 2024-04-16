@@ -1,27 +1,27 @@
 use age_core::format::{FileKey, Stanza};
 use age_plugin::{
     identity::{self, IdentityPluginV1},
-    print_new_identity,
     recipient::{self, RecipientPluginV1},
     run_state_machine, Callbacks,
 };
+use bech32::{ToBase32, Variant};
 use card_backend_pcsc::PcscBackend;
 use clap::Parser;
 use openpgp_card::{crypto_data::PublicKeyMaterial, Card};
 use subtle::ConstantTimeEq;
-use x25519_dalek::{EphemeralSecret, PublicKey};
+use x25519_dalek::PublicKey;
 
 use std::collections::HashMap;
 use std::io;
 
 use age_core::{
     format::FILE_KEY_BYTES,
-    primitives::{aead_decrypt, aead_encrypt, hkdf},
-    secrecy::{ExposeSecret, SecretString},
+    primitives::{aead_decrypt, hkdf},
+    secrecy::ExposeSecret,
 };
 
 // Use lower-case HRP to avoid https://github.com/rust-bitcoin/rust-bech32/issues/40
-const SECRET_KEY_PREFIX: &str = "age-secret-key-";
+const IDENTITY_PREFIX: &str = "age-plugin-openpgp-card-";
 const PUBLIC_KEY_PREFIX: &str = "age";
 
 pub const X25519_RECIPIENT_TAG: &str = "X25519";
@@ -34,26 +34,26 @@ struct RecipientPlugin;
 impl RecipientPluginV1 for RecipientPlugin {
     fn add_recipient(
         &mut self,
-        index: usize,
-        plugin_name: &str,
-        bytes: &[u8],
+        _index: usize,
+        _plugin_name: &str,
+        _bytes: &[u8],
     ) -> Result<(), recipient::Error> {
         todo!()
     }
 
     fn add_identity(
         &mut self,
-        index: usize,
-        plugin_name: &str,
-        bytes: &[u8],
+        _index: usize,
+        _plugin_name: &str,
+        _bytes: &[u8],
     ) -> Result<(), recipient::Error> {
         todo!()
     }
 
     fn wrap_file_keys(
         &mut self,
-        file_keys: Vec<FileKey>,
-        mut callbacks: impl Callbacks<recipient::Error>,
+        _file_keys: Vec<FileKey>,
+        _callbacks: impl Callbacks<recipient::Error>,
     ) -> io::Result<Result<Vec<Vec<Stanza>>, Vec<recipient::Error>>> {
         todo!()
     }
@@ -115,10 +115,8 @@ impl IdentityPluginV1 for IdentityPlugin {
             .try_into()
             .expect("Length should have been checked above");
 
-        //        let pk: PublicKey = (&self.0).into();
         let backend = PcscBackend::cards(None)
             .expect("cards")
-            .into_iter()
             .next()
             .expect("one card");
         let mut card = Card::new(backend.expect("backend")).expect("card");
@@ -144,9 +142,6 @@ impl IdentityPluginV1 for IdentityPlugin {
                 &ephemeral_share,
             ))
             .expect("decipher to work");
-        //let shared_secret = "test"; //self.0.diffie_hellman(&epk);
-        // Replace with `SharedSecret::was_contributory` once x25519-dalek supports newer
-        // zeroize (https://github.com/dalek-cryptography/x25519-dalek/issues/74#issuecomment-1159481280).
         if shared_secret
             .iter()
             .fold(0, |acc, b| acc | b)
@@ -167,7 +162,7 @@ impl IdentityPluginV1 for IdentityPlugin {
         // matches a particular stanza.
         let result = aead_decrypt(&enc_key, FILE_KEY_BYTES, &encrypted_file_key)
             .ok()
-            .map(|mut pt| {
+            .map(|pt| {
                 // It's ours!
                 let file_key: [u8; FILE_KEY_BYTES] = pt[..].try_into().unwrap();
                 //pt.zeroize();
@@ -191,25 +186,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opts = PluginOptions::parse();
 
     if let Some(state_machine) = opts.age_plugin {
-        // The plugin was started by an age client; run the state machine.
         return Ok(run_state_machine(
             &state_machine,
             Some(|| RecipientPlugin),
             Some(|| IdentityPlugin),
         )?);
     }
-    use bech32::{ToBase32, Variant};
-    const IDENTITY_PREFIX: &str = "age-plugin-openpgp-card-";
-
-    const PUBLIC_KEY_PREFIX: &str = "age";
 
     for backend in PcscBackend::cards(None)? {
         let mut card = Card::new(backend?)?;
         let mut tx = card.transaction()?;
-        //tx.application_related_data()?;
-        //tx.verify_pw1_user(&"12345".as_bytes())?;
-        //tx.decipher(openpgp_card::crypto_data::Cryptogram::ECDH())
-        //
         if let PublicKeyMaterial::E(ecc) = tx.public_key(openpgp_card::KeyType::Decryption)? {
             eprintln!(
                 "# {}",
@@ -226,20 +212,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Here you can assume the binary is being run directly by a user,
-    // and perform administrative tasks like generating keys.
-
-    Ok(())
-}
-
-fn decrypt() -> Result<(), Box<dyn std::error::Error>> {
-    for backend in PcscBackend::cards(None)? {
-        let mut card = Card::new(backend?)?;
-        let mut tx = card.transaction()?;
-        //tx.application_related_data()?;
-        tx.verify_pw1_user(&"12345".as_bytes())?;
-        //tx.decipher(openpgp_card::crypto_data::Cryptogram::ECDH())
-        //
-    }
     Ok(())
 }
