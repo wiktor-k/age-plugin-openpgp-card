@@ -1,4 +1,7 @@
-use age_core::format::{FileKey, Stanza};
+use age_core::{
+    format::{FileKey, Stanza},
+    secrecy::Zeroize as _,
+};
 use age_plugin::{
     identity::{self, IdentityPluginV1},
     recipient::{self, RecipientPluginV1},
@@ -23,6 +26,7 @@ use age_core::{
 // Use lower-case HRP to avoid https://github.com/rust-bitcoin/rust-bech32/issues/40
 const IDENTITY_PREFIX: &str = "age-plugin-openpgp-card-";
 const PUBLIC_KEY_PREFIX: &str = "age";
+const PLUGIN_NAME: &str = "openpgp-card";
 
 pub const X25519_RECIPIENT_TAG: &str = "X25519";
 const X25519_RECIPIENT_KEY_LABEL: &[u8] = b"age-encryption.org/v1/X25519";
@@ -59,7 +63,13 @@ impl RecipientPluginV1 for RecipientPlugin {
     }
 }
 
-struct IdentityPlugin;
+struct CardStub {
+    ident: String,
+}
+
+struct IdentityPlugin {
+    cards: Vec<CardStub>,
+}
 
 use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
 pub(crate) fn base64_arg<A: AsRef<[u8]>, const N: usize, const B: usize>(
@@ -75,26 +85,23 @@ pub(crate) fn base64_arg<A: AsRef<[u8]>, const N: usize, const B: usize>(
         _ => None,
     }
 }
-impl IdentityPluginV1 for IdentityPlugin {
-    fn add_identity(
-        &mut self,
-        index: usize,
-        plugin_name: &str,
-        bytes: &[u8],
-    ) -> Result<(), identity::Error> {
-        eprintln!("add_identity: {index} {plugin_name} {bytes:?}");
-        Ok(())
-    }
 
-    fn unwrap_file_keys(
+#[derive(Debug, thiserror::Error)]
+enum DecryptError {
+    #[error("Invalid header")]
+    InvalidHeader,
+    #[error("Card does not contain ECC key")]
+    NonEccCard,
+}
+
+impl IdentityPlugin {
+    fn unwrap_stanza(
         &mut self,
-        files: Vec<Vec<Stanza>>,
-        mut callbacks: impl Callbacks<identity::Error>,
-    ) -> io::Result<HashMap<usize, Result<FileKey, Vec<identity::Error>>>> {
-        let stanza = &files[0][0];
-        eprintln!("stanza {stanza:?}");
+        stanza: &Stanza,
+        callbacks: &mut impl Callbacks<identity::Error>,
+    ) -> Result<Option<FileKey>, Box<dyn std::error::Error>> {
         if stanza.tag != X25519_RECIPIENT_TAG {
-            panic!("return None;");
+            return Err(std::io::Error::other("bad stanza tag").into());
         }
 
         // Enforce valid and canonical stanza format.
@@ -102,12 +109,12 @@ impl IdentityPluginV1 for IdentityPlugin {
         let ephemeral_share = match &stanza.args[..] {
             [arg] => match base64_arg::<_, EPK_LEN_BYTES, 33>(arg) {
                 Some(ephemeral_share) => ephemeral_share,
-                None => panic!("return Some(Err(DecryptError::InvalidHeader)),"),
+                None => return Err(DecryptError::InvalidHeader.into()),
             },
-            _ => panic!("return Some(Err(DecryptError::InvalidHeader)),"),
+            _ => return Err(DecryptError::InvalidHeader.into()),
         };
         if stanza.body.len() != ENCRYPTED_FILE_KEY_BYTES {
-            panic!("return Some(Err(DecryptError::InvalidHeader));");
+            return Err(DecryptError::InvalidHeader.into());
         }
 
         let epk: PublicKey = ephemeral_share.into();
@@ -115,64 +122,112 @@ impl IdentityPluginV1 for IdentityPlugin {
             .try_into()
             .expect("Length should have been checked above");
 
-        let backend = PcscBackend::cards(None)
-            .expect("cards")
-            .next()
-            .expect("one card");
-        let mut card = Card::new(backend.expect("backend")).expect("card");
-        let mut tx = card.transaction().expect("tx");
-        let pk: Vec<u8> = if let PublicKeyMaterial::E(ecc) = tx
-            .public_key(openpgp_card::KeyType::Decryption)
-            .expect("pk")
-        {
-            ecc.data().into()
-        } else {
-            panic!("not ecc key");
-        };
-        tx.verify_pw1_user(
-            callbacks
-                .request_secret("plz unlock")?
-                .expect("secret")
-                .expose_secret()
-                .as_bytes(),
-        )
-        .expect("verify to work");
-        let shared_secret = tx
-            .decipher(openpgp_card::crypto_data::Cryptogram::ECDH(
+        for backend in PcscBackend::cards(None)? {
+            let mut card = Card::new(backend?)?;
+            let mut tx = card.transaction()?;
+            let ident = tx.application_identifier()?.ident();
+            if !self.cards.iter().any(|stub| stub.ident == ident) {
+                // it's not a card we have the identity for
+                continue;
+            }
+            let pk: Vec<u8> = if let PublicKeyMaterial::E(ecc) =
+                tx.public_key(openpgp_card::KeyType::Decryption)?
+            {
+                ecc.data().into()
+            } else {
+                return Err(DecryptError::NonEccCard.into());
+            };
+            tx.verify_pw1_user(
+                callbacks
+                    .request_secret(&format!("Unlock card {ident}"))??
+                    .expose_secret()
+                    .as_bytes(),
+            )?;
+            let shared_secret = tx.decipher(openpgp_card::crypto_data::Cryptogram::ECDH(
                 &ephemeral_share,
-            ))
-            .expect("decipher to work");
-        if shared_secret
-            .iter()
-            .fold(0, |acc, b| acc | b)
-            .ct_eq(&0)
-            .into()
-        {
-            panic!("return Some(Err(DecryptError::InvalidHeader));");
+            ))?;
+            if shared_secret
+                .iter()
+                .fold(0, |acc, b| acc | b)
+                .ct_eq(&0)
+                .into()
+            {
+                return Err(DecryptError::InvalidHeader.into());
+            }
+
+            let mut salt = [0; 64];
+            salt[..32].copy_from_slice(epk.as_bytes());
+            salt[32..].copy_from_slice(&pk[..]);
+
+            let enc_key = hkdf(&salt, X25519_RECIPIENT_KEY_LABEL, &shared_secret);
+
+            // A failure to decrypt is non-fatal (we try to decrypt the recipient
+            // stanza with other X25519 keys), because we cannot tell which key
+            // matches a particular stanza.
+            if let Some(result) = aead_decrypt(&enc_key, FILE_KEY_BYTES, &encrypted_file_key)
+                .ok()
+                .map(|mut pt| {
+                    // It's ours!
+                    let file_key: [u8; FILE_KEY_BYTES] = pt[..].try_into().unwrap();
+                    pt.zeroize();
+                    FileKey::from(file_key)
+                })
+            {
+                return Ok(Some(result));
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl IdentityPluginV1 for IdentityPlugin {
+    fn add_identity(
+        &mut self,
+        index: usize,
+        plugin_name: &str,
+        bytes: &[u8],
+    ) -> Result<(), identity::Error> {
+        if plugin_name == PLUGIN_NAME {
+            self.cards.push(CardStub {
+                ident: String::from_utf8_lossy(bytes).to_string(),
+            });
+            Ok(())
+        } else {
+            Err(identity::Error::Identity {
+                index,
+                message: "invalid recipient".into(),
+            })
+        }
+    }
+
+    fn unwrap_file_keys(
+        &mut self,
+        files: Vec<Vec<Stanza>>,
+        mut callbacks: impl Callbacks<identity::Error>,
+    ) -> io::Result<HashMap<usize, Result<FileKey, Vec<identity::Error>>>> {
+        let mut file_keys = HashMap::with_capacity(files.len());
+        for (file_index, stanzas) in files.iter().enumerate() {
+            for (stanza_index, stanza) in stanzas.iter().enumerate() {
+                match self.unwrap_stanza(stanza, &mut callbacks).map_err(|e| {
+                    vec![identity::Error::Stanza {
+                        file_index,
+                        stanza_index,
+                        message: e.to_string(),
+                    }]
+                }) {
+                    Ok(Some(file_key)) => {
+                        file_keys.entry(file_index).or_insert(Ok(file_key));
+                    }
+
+                    Err(error) => {
+                        file_keys.entry(file_index).or_insert(Err(error));
+                    }
+                    _ => {}
+                }
+            }
         }
 
-        let mut salt = [0; 64];
-        salt[..32].copy_from_slice(epk.as_bytes());
-        salt[32..].copy_from_slice(&pk[..]);
-
-        let enc_key = hkdf(&salt, X25519_RECIPIENT_KEY_LABEL, &shared_secret);
-
-        // A failure to decrypt is non-fatal (we try to decrypt the recipient
-        // stanza with other X25519 keys), because we cannot tell which key
-        // matches a particular stanza.
-        let result = aead_decrypt(&enc_key, FILE_KEY_BYTES, &encrypted_file_key)
-            .ok()
-            .map(|pt| {
-                // It's ours!
-                let file_key: [u8; FILE_KEY_BYTES] = pt[..].try_into().unwrap();
-                //pt.zeroize();
-                Ok(FileKey::from(file_key))
-            })
-            .unwrap();
-
-        let mut map = HashMap::new();
-        map.insert(0, result);
-        Ok(map) //result
+        Ok(file_keys)
     }
 }
 
@@ -189,7 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(run_state_machine(
             &state_machine,
             Some(|| RecipientPlugin),
-            Some(|| IdentityPlugin),
+            Some(|| IdentityPlugin { cards: vec![] }),
         )?);
     }
 
@@ -197,18 +252,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut card = Card::new(backend?)?;
         let mut tx = card.transaction()?;
         if let PublicKeyMaterial::E(ecc) = tx.public_key(openpgp_card::KeyType::Decryption)? {
-            eprintln!(
+            let ident = tx.application_identifier()?.ident();
+            println!("# Card ident {}", ident);
+            println!(
                 "# {}",
-                bech32::encode(PUBLIC_KEY_PREFIX, ecc.data().to_base32(), Variant::Bech32)
-                    .expect("HRP is valid")
+                bech32::encode(PUBLIC_KEY_PREFIX, ecc.data().to_base32(), Variant::Bech32)?
             );
 
-            eprintln!(
-                "Encoded: {}",
-                bech32::encode(IDENTITY_PREFIX, &[1, 2, 3].to_base32(), Variant::Bech32,)
-                    .expect("bech to work")
+            println!(
+                "{}",
+                bech32::encode(IDENTITY_PREFIX, ident.to_base32(), Variant::Bech32,)?
                     .to_uppercase()
             );
+            println!();
         }
     }
 
