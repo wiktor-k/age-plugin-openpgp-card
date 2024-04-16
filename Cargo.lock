@@ -49,6 +49,7 @@ dependencies = [
  "age-core",
  "age-plugin",
  "base64 0.22.0",
+ "bech32",
  "card-backend-pcsc",
  "clap",
  "openpgp-card",

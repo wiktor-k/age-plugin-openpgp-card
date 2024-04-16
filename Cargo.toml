@@ -9,6 +9,7 @@ edition = "2021"
 age-core = "0.10.0"
 age-plugin = "0.5.0"
 base64 = "0.22.0"
+bech32 = "0.9"
 card-backend-pcsc = "0.5.0"
 clap = { version = "4.5.4", features = ["derive"] }
 openpgp-card = "0.4.2"
