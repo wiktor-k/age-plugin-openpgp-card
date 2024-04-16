@@ -1,9 +1,12 @@
 [package]
 name = "age-plugin-openpgp-card"
+description = "Age plugin for using ed25519 on OpenPGP Card devices (Yubikeys, Nitrokeys)"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "Apache-2.0 OR MIT"
+keywords = ["age", "cli", "encryption", "openpgp", "yubikey"]
+categories = ["command-line-utilities", "cryptography"]
+authors = ["Wiktor Kwapisiewicz <wiktor@metacode.biz>"]
 
 [dependencies]
 age-core = "0.10.0"

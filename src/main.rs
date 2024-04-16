@@ -1,3 +1,13 @@
+#![doc = include_str!("../README.md")]
+
+use std::collections::HashMap;
+use std::io;
+
+use age_core::{
+    format::FILE_KEY_BYTES,
+    primitives::{aead_decrypt, hkdf},
+    secrecy::ExposeSecret,
+};
 use age_core::{
     format::{FileKey, Stanza},
     secrecy::Zeroize as _,
@@ -13,15 +23,6 @@ use clap::Parser;
 use openpgp_card::{crypto_data::PublicKeyMaterial, Card};
 use subtle::ConstantTimeEq;
 use x25519_dalek::PublicKey;
-
-use std::collections::HashMap;
-use std::io;
-
-use age_core::{
-    format::FILE_KEY_BYTES,
-    primitives::{aead_decrypt, hkdf},
-    secrecy::ExposeSecret,
-};
 
 // Use lower-case HRP to avoid https://github.com/rust-bitcoin/rust-bech32/issues/40
 const IDENTITY_PREFIX: &str = "age-plugin-openpgp-card-";
