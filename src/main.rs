@@ -96,6 +96,18 @@ enum DecryptError {
 }
 
 impl IdentityPlugin {
+    fn get_card(ident: &str) -> Result<Option<Card>, Box<dyn std::error::Error>> {
+        for backend in PcscBackend::cards(None)? {
+            let mut card = Card::new(backend?)?;
+            let tx = card.transaction()?;
+            if ident == tx.application_identifier()?.ident() {
+                drop(tx);
+                return Ok(Some(card));
+            }
+        }
+        Ok(None)
+    }
+
     fn unwrap_stanza(
         &mut self,
         stanza: &Stanza,
@@ -123,8 +135,22 @@ impl IdentityPlugin {
             .try_into()
             .expect("Length should have been checked above");
 
-        for backend in PcscBackend::cards(None)? {
-            let mut card = Card::new(backend?)?;
+        'cards: for card in self.cards.iter() {
+            let mut card = loop {
+                let car = Self::get_card(&card.ident)?;
+                if let Some(card) = car {
+                    break card;
+                } else {
+                    let res = callbacks.confirm(
+                        &format!("Please insert card {}", card.ident),
+                        "OK",
+                        None,
+                    )??;
+                    if !res {
+                        continue 'cards;
+                    };
+                }
+            };
             let mut tx = card.transaction()?;
             let ident = tx.application_identifier()?.ident();
             if !self.cards.iter().any(|stub| stub.ident == ident) {
