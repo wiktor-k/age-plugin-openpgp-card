@@ -135,14 +135,14 @@ impl IdentityPlugin {
             .try_into()
             .expect("Length should have been checked above");
 
-        'cards: for card in self.cards.iter() {
+        'cards: for card_stub in self.cards.iter() {
             let mut card = loop {
-                let car = Self::get_card(&card.ident)?;
+                let car = Self::get_card(&card_stub.ident)?;
                 if let Some(card) = car {
                     break card;
                 } else {
                     let res = callbacks.confirm(
-                        &format!("Please insert card {}", card.ident),
+                        &format!("Please insert card {}", card_stub.ident),
                         "OK",
                         None,
                     )??;
@@ -152,11 +152,6 @@ impl IdentityPlugin {
                 }
             };
             let mut tx = card.transaction()?;
-            let ident = tx.application_identifier()?.ident();
-            if !self.cards.iter().any(|stub| stub.ident == ident) {
-                // it's not a card we have the identity for
-                continue;
-            }
             let pk: Vec<u8> = if let PublicKeyMaterial::E(ecc) =
                 tx.public_key(openpgp_card::KeyType::Decryption)?
             {
@@ -166,10 +161,20 @@ impl IdentityPlugin {
             };
             tx.verify_pw1_user(
                 callbacks
-                    .request_secret(&format!("Unlock card {ident}"))??
+                    .request_secret(&format!("Unlock card {}", card_stub.ident))??
                     .expose_secret()
                     .as_bytes(),
             )?;
+
+            if let Ok(Some(uif)) = tx.application_related_data()?.uif_pso_aut() {
+                if uif.touch_policy().touch_required() {
+                    callbacks.message(&format!(
+                        "Touch your card {} now to decrypt.",
+                        card_stub.ident
+                    ))??;
+                }
+            };
+
             let shared_secret = tx.decipher(openpgp_card::crypto_data::Cryptogram::ECDH(
                 &ephemeral_share,
             ))?;
