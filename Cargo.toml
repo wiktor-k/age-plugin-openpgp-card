@@ -1,7 +1,7 @@
 [package]
 name = "age-plugin-openpgp-card"
 description = "Age plugin for using ed25519 on OpenPGP Card devices (Yubikeys, Nitrokeys)"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 keywords = ["age", "cli", "encryption", "openpgp", "yubikey"]
