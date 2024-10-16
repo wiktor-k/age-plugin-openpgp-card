@@ -11,7 +11,7 @@ sleep 2
 export PINENTRY_PROGRAM=/app/scripts/fake-pinentry.sh
 echo 12345678 > admin-pin
 echo 123456 > user-pin
-oct admin --card 0000:00000000 --admin-pin admin-pin generate --user-pin user-pin --output /tmp/no-need-for-this cv25519
+oct admin --card 0000:00000000 --admin-pin admin-pin generate --user-pin user-pin --output /tmp/no-need-for-this --userid 'No need for that' curve25519
 
 age-plugin-openpgp-card | tee identity.txt
 grep -oh "age1.*" identity.txt > recipients.txt
