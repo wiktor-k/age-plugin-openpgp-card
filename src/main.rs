@@ -6,7 +6,6 @@ use std::io;
 use age_core::{
     format::FILE_KEY_BYTES,
     primitives::{aead_decrypt, hkdf},
-    secrecy::ExposeSecret,
 };
 use age_core::{
     format::{FileKey, Stanza},
@@ -17,16 +16,23 @@ use age_plugin::{
     recipient::{self, RecipientPluginV1},
     run_state_machine, Callbacks,
 };
-use bech32::{ToBase32, Variant};
+use bech32::{Bech32, Hrp};
 use card_backend_pcsc::PcscBackend;
 use clap::Parser;
-use openpgp_card::{crypto_data::PublicKeyMaterial, Card};
+use openpgp_card::{
+    ocard::{
+        crypto::{Cryptogram, PublicKeyMaterial},
+        KeyType::Decryption,
+    },
+    state::Open,
+    Card,
+};
 use subtle::ConstantTimeEq;
 use x25519_dalek::PublicKey;
 
 // Use lower-case HRP to avoid https://github.com/rust-bitcoin/rust-bech32/issues/40
-const IDENTITY_PREFIX: &str = "age-plugin-openpgp-card-";
-const PUBLIC_KEY_PREFIX: &str = "age";
+const IDENTITY_PREFIX: Hrp = Hrp::parse_unchecked("age-plugin-openpgp-card-");
+const PUBLIC_KEY_PREFIX: Hrp = Hrp::parse_unchecked("age");
 const PLUGIN_NAME: &str = "openpgp-card";
 
 pub const X25519_RECIPIENT_TAG: &str = "X25519";
@@ -96,7 +102,7 @@ enum DecryptError {
 }
 
 impl IdentityPlugin {
-    fn get_card(ident: &str) -> Result<Option<Card>, Box<dyn std::error::Error>> {
+    fn get_card(ident: &str) -> Result<Option<Card<Open>>, Box<dyn std::error::Error>> {
         for backend in PcscBackend::cards(None)? {
             let mut card = Card::new(backend?)?;
             let tx = card.transaction()?;
@@ -152,21 +158,17 @@ impl IdentityPlugin {
                 }
             };
             let mut tx = card.transaction()?;
-            let pk: Vec<u8> = if let PublicKeyMaterial::E(ecc) =
-                tx.public_key(openpgp_card::KeyType::Decryption)?
-            {
-                ecc.data().into()
-            } else {
-                return Err(DecryptError::NonEccCard.into());
-            };
-            tx.verify_pw1_user(
-                callbacks
-                    .request_secret(&format!("Unlock card {}", card_stub.ident))??
-                    .expose_secret()
-                    .as_bytes(),
+            let pk: Vec<u8> =
+                if let PublicKeyMaterial::E(ecc) = tx.public_key_material(Decryption)? {
+                    ecc.data().into()
+                } else {
+                    return Err(DecryptError::NonEccCard.into());
+                };
+            tx.verify_user_pin(
+                callbacks.request_secret(&format!("Unlock card {}", card_stub.ident))??,
             )?;
 
-            if let Ok(Some(uif)) = tx.application_related_data()?.uif_pso_aut() {
+            if let Ok(Some(uif)) = tx.user_interaction_flag(Decryption) {
                 if uif.touch_policy().touch_required() {
                     callbacks.message(&format!(
                         "Touch your card {} now to decrypt.",
@@ -175,9 +177,7 @@ impl IdentityPlugin {
                 }
             };
 
-            let shared_secret = tx.decipher(openpgp_card::crypto_data::Cryptogram::ECDH(
-                &ephemeral_share,
-            ))?;
+            let shared_secret = tx.card().decipher(Cryptogram::ECDH(&ephemeral_share))?;
             if shared_secret
                 .iter()
                 .fold(0, |acc, b| acc | b)
@@ -283,18 +283,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for backend in PcscBackend::cards(None)? {
         let mut card = Card::new(backend?)?;
         let mut tx = card.transaction()?;
-        if let PublicKeyMaterial::E(ecc) = tx.public_key(openpgp_card::KeyType::Decryption)? {
+        if let PublicKeyMaterial::E(ecc) = tx.public_key_material(Decryption)? {
             let ident = tx.application_identifier()?.ident();
             println!("# Card ident {}", ident);
             println!(
                 "# {}",
-                bech32::encode(PUBLIC_KEY_PREFIX, ecc.data().to_base32(), Variant::Bech32)?
+                bech32::encode::<Bech32>(PUBLIC_KEY_PREFIX, ecc.data())?
             );
 
             println!(
                 "{}",
-                bech32::encode(IDENTITY_PREFIX, ident.to_base32(), Variant::Bech32,)?
-                    .to_uppercase()
+                bech32::encode::<Bech32>(IDENTITY_PREFIX, ident.as_bytes())?.to_uppercase()
             );
             println!();
         }
