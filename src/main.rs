@@ -3,17 +3,15 @@
 use std::collections::HashMap;
 use std::io;
 
+use age_core::format::{FileKey, Stanza};
+use age_core::secrecy::ExposeSecret;
 use age_core::{
     format::FILE_KEY_BYTES,
     primitives::{aead_decrypt, hkdf},
 };
-use age_core::{
-    format::{FileKey, Stanza},
-    secrecy::Zeroize as _,
-};
+use age_plugin::PluginHandler;
 use age_plugin::{
     identity::{self, IdentityPluginV1},
-    recipient::{self, RecipientPluginV1},
     run_state_machine, Callbacks,
 };
 use bech32::{Bech32, Hrp};
@@ -29,6 +27,7 @@ use openpgp_card::{
 };
 use subtle::ConstantTimeEq;
 use x25519_dalek::PublicKey;
+use zeroize::Zeroize as _;
 
 // Use lower-case HRP to avoid https://github.com/rust-bitcoin/rust-bech32/issues/40
 const IDENTITY_PREFIX: Hrp = Hrp::parse_unchecked("age-plugin-openpgp-card-");
@@ -40,35 +39,6 @@ const X25519_RECIPIENT_KEY_LABEL: &[u8] = b"age-encryption.org/v1/X25519";
 
 pub const EPK_LEN_BYTES: usize = 32;
 pub const ENCRYPTED_FILE_KEY_BYTES: usize = FILE_KEY_BYTES + 16;
-struct RecipientPlugin;
-
-impl RecipientPluginV1 for RecipientPlugin {
-    fn add_recipient(
-        &mut self,
-        _index: usize,
-        _plugin_name: &str,
-        _bytes: &[u8],
-    ) -> Result<(), recipient::Error> {
-        todo!()
-    }
-
-    fn add_identity(
-        &mut self,
-        _index: usize,
-        _plugin_name: &str,
-        _bytes: &[u8],
-    ) -> Result<(), recipient::Error> {
-        todo!()
-    }
-
-    fn wrap_file_keys(
-        &mut self,
-        _file_keys: Vec<FileKey>,
-        _callbacks: impl Callbacks<recipient::Error>,
-    ) -> io::Result<Result<Vec<Vec<Stanza>>, Vec<recipient::Error>>> {
-        todo!()
-    }
-}
 
 struct CardStub {
     ident: String,
@@ -165,7 +135,11 @@ impl IdentityPlugin {
                     return Err(DecryptError::NonEccCard.into());
                 };
             tx.verify_user_pin(
-                callbacks.request_secret(&format!("Unlock card {}", card_stub.ident))??,
+                callbacks
+                    .request_secret(&format!("Unlock card {}", card_stub.ident))??
+                    .expose_secret()
+                    .to_string()
+                    .into(),
             )?;
 
             if let Ok(Some(uif)) = tx.user_interaction_flag(Decryption) {
@@ -202,7 +176,7 @@ impl IdentityPlugin {
                     // It's ours!
                     let file_key: [u8; FILE_KEY_BYTES] = pt[..].try_into().unwrap();
                     pt.zeroize();
-                    FileKey::from(file_key)
+                    FileKey::new(Box::new(file_key))
                 })
             {
                 return Ok(Some(result));
@@ -210,6 +184,12 @@ impl IdentityPlugin {
         }
         Ok(None)
     }
+}
+
+impl PluginHandler for IdentityPlugin {
+    type RecipientV1 = std::convert::Infallible;
+
+    type IdentityV1 = Self;
 }
 
 impl IdentityPluginV1 for IdentityPlugin {
@@ -275,8 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(state_machine) = opts.age_plugin {
         return Ok(run_state_machine(
             &state_machine,
-            Some(|| RecipientPlugin),
-            Some(|| IdentityPlugin { cards: vec![] }),
+            IdentityPlugin { cards: vec![] },
         )?);
     }
 

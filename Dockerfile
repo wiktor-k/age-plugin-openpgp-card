@@ -10,4 +10,5 @@ COPY src /app/src
 WORKDIR /app/
 RUN cargo install --path .
 COPY scripts /app/scripts
+ENV AGEDEBUG=plugin
 RUN ./scripts/encrypt-decrypt.sh
