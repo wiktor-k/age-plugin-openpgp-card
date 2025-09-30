@@ -24,7 +24,7 @@ use openpgp_card::{
         crypto::{Cryptogram, PublicKeyMaterial},
         KeyType::Decryption,
     },
-    state::Open,
+    state::{Open, Transaction},
     Card,
 };
 use subtle::ConstantTimeEq;
@@ -70,6 +70,7 @@ impl RecipientPluginV1 for RecipientPlugin {
     }
 }
 
+#[derive(Debug)]
 struct CardStub {
     ident: String,
 }
@@ -97,8 +98,6 @@ pub(crate) fn base64_arg<A: AsRef<[u8]>, const N: usize, const B: usize>(
 enum DecryptError {
     #[error("Invalid header")]
     InvalidHeader,
-    #[error("Card does not contain ECC key")]
-    NonEccCard,
 }
 
 impl IdentityPlugin {
@@ -114,8 +113,10 @@ impl IdentityPlugin {
         Ok(None)
     }
 
-    fn unwrap_stanza(
-        &mut self,
+    fn unwrap_stanza<'a>(
+        tx: &mut Card<Transaction<'a>>,
+        ident: &str,
+        pk: &[u8],
         stanza: &Stanza,
         callbacks: &mut impl Callbacks<identity::Error>,
     ) -> Result<Option<FileKey>, Box<dyn std::error::Error>> {
@@ -141,73 +142,45 @@ impl IdentityPlugin {
             .try_into()
             .expect("Length should have been checked above");
 
-        'cards: for card_stub in self.cards.iter() {
-            let mut card = loop {
-                let car = Self::get_card(&card_stub.ident)?;
-                if let Some(card) = car {
-                    break card;
-                } else {
-                    let res = callbacks.confirm(
-                        &format!("Please insert card {}", card_stub.ident),
-                        "OK",
-                        None,
-                    )??;
-                    if !res {
-                        continue 'cards;
-                    };
-                }
-            };
-            let mut tx = card.transaction()?;
-            let pk: Vec<u8> =
-                if let PublicKeyMaterial::E(ecc) = tx.public_key_material(Decryption)? {
-                    ecc.data().into()
-                } else {
-                    return Err(DecryptError::NonEccCard.into());
-                };
-            tx.verify_user_pin(
-                callbacks.request_secret(&format!("Unlock card {}", card_stub.ident))??,
-            )?;
-
-            if let Ok(Some(uif)) = tx.user_interaction_flag(Decryption) {
-                if uif.touch_policy().touch_required() {
-                    callbacks.message(&format!(
-                        "Touch your card {} now to decrypt.",
-                        card_stub.ident
-                    ))??;
-                }
-            };
-
-            let shared_secret = tx.card().decipher(Cryptogram::ECDH(&ephemeral_share))?;
-            if shared_secret
-                .iter()
-                .fold(0, |acc, b| acc | b)
-                .ct_eq(&0)
-                .into()
-            {
-                return Err(DecryptError::InvalidHeader.into());
+        if let Ok(Some(uif)) = tx.user_interaction_flag(Decryption) {
+            if uif.touch_policy().touch_required() {
+                callbacks
+                    .message(&format!("Touch your card {ident} now to decrypt.",))?
+                    .unwrap();
             }
+        };
 
-            let mut salt = [0; 64];
-            salt[..32].copy_from_slice(epk.as_bytes());
-            salt[32..].copy_from_slice(&pk[..]);
-
-            let enc_key = hkdf(&salt, X25519_RECIPIENT_KEY_LABEL, &shared_secret);
-
-            // A failure to decrypt is non-fatal (we try to decrypt the recipient
-            // stanza with other X25519 keys), because we cannot tell which key
-            // matches a particular stanza.
-            if let Some(result) = aead_decrypt(&enc_key, FILE_KEY_BYTES, &encrypted_file_key)
-                .ok()
-                .map(|mut pt| {
-                    // It's ours!
-                    let file_key: [u8; FILE_KEY_BYTES] = pt[..].try_into().unwrap();
-                    pt.zeroize();
-                    FileKey::from(file_key)
-                })
-            {
-                return Ok(Some(result));
-            }
+        let shared_secret = tx.card().decipher(Cryptogram::ECDH(&ephemeral_share))?;
+        if shared_secret
+            .iter()
+            .fold(0, |acc, b| acc | b)
+            .ct_eq(&0)
+            .into()
+        {
+            return Err(DecryptError::InvalidHeader.into());
         }
+
+        let mut salt = [0; 64];
+        salt[..32].copy_from_slice(epk.as_bytes());
+        salt[32..].copy_from_slice(pk);
+
+        let enc_key = hkdf(&salt, X25519_RECIPIENT_KEY_LABEL, &shared_secret);
+
+        // A failure to decrypt is non-fatal (we try to decrypt the recipient
+        // stanza with other X25519 keys), because we cannot tell which key
+        // matches a particular stanza.
+        if let Some(result) = aead_decrypt(&enc_key, FILE_KEY_BYTES, &encrypted_file_key)
+            .ok()
+            .map(|mut pt| {
+                // It's ours!
+                let file_key: [u8; FILE_KEY_BYTES] = pt[..].try_into().unwrap();
+                pt.zeroize();
+                FileKey::from(file_key)
+            })
+        {
+            return Ok(Some(result));
+        }
+
         Ok(None)
     }
 }
@@ -237,29 +210,59 @@ impl IdentityPluginV1 for IdentityPlugin {
         files: Vec<Vec<Stanza>>,
         mut callbacks: impl Callbacks<identity::Error>,
     ) -> io::Result<HashMap<usize, Result<FileKey, Vec<identity::Error>>>> {
-        let mut file_keys = HashMap::with_capacity(files.len());
-        for (file_index, stanzas) in files.iter().enumerate() {
-            for (stanza_index, stanza) in stanzas.iter().enumerate() {
-                match self.unwrap_stanza(stanza, &mut callbacks).map_err(|e| {
-                    vec![identity::Error::Stanza {
-                        file_index,
-                        stanza_index,
-                        message: e.to_string(),
-                    }]
-                }) {
-                    Ok(Some(file_key)) => {
+        'cards: for card_stub in self.cards.iter() {
+            let ident = card_stub.ident.as_str();
+            let mut card = loop {
+                let car = Self::get_card(&card_stub.ident).unwrap();
+                if let Some(card) = car {
+                    break card;
+                } else {
+                    let res = callbacks
+                        .confirm(&format!("Please insert card {}", ident), "OK", None)?
+                        .unwrap();
+                    if !res {
+                        continue 'cards;
+                    };
+                }
+            };
+
+            let mut tx = card.transaction().unwrap();
+            let pk: Vec<u8> =
+                if let PublicKeyMaterial::E(ecc) = tx.public_key_material(Decryption).unwrap() {
+                    ecc.data().into()
+                } else {
+                    //return Err(DecryptError::NonEccCard.into());
+                    continue 'cards;
+                };
+
+            tx.verify_user_pin(
+                callbacks
+                    .request_secret(&format!("Unlock card {}", ident))?
+                    .unwrap(),
+            )
+            .unwrap();
+            let mut file_keys = HashMap::with_capacity(files.len());
+            for (file_index, stanzas) in files.iter().enumerate() {
+                for (stanza_index, stanza) in stanzas.iter().enumerate() {
+                    if let Ok(Some(file_key)) =
+                        Self::unwrap_stanza(&mut tx, ident, &pk, stanza, &mut callbacks).map_err(
+                            |e| {
+                                vec![identity::Error::Stanza {
+                                    file_index,
+                                    stanza_index,
+                                    message: e.to_string(),
+                                }]
+                            },
+                        )
+                    {
                         file_keys.entry(file_index).or_insert(Ok(file_key));
                     }
-
-                    Err(error) => {
-                        file_keys.entry(file_index).or_insert(Err(error));
-                    }
-                    _ => {}
                 }
             }
-        }
 
-        Ok(file_keys)
+            return Ok(file_keys);
+        }
+        Ok(Default::default())
     }
 }
 
