@@ -10,4 +10,6 @@ COPY src /app/src
 WORKDIR /app/
 RUN cargo install --path .
 COPY scripts /app/scripts
+# see: https://blog.apdu.fr/posts/2023/11/pcsc-lite-and-polkit/
+RUN sh -c 'echo PCSCD_ARGS="--disable-polkit" > /etc/default/pcscd'
 RUN ./scripts/encrypt-decrypt.sh
