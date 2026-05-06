@@ -8,6 +8,7 @@ set dotenv-load
 # codespell is very fast. cargo fmt does not need to download crates etc.
 
 # Perform all checks
+[parallel]
 check: spelling formatting docs lints dependencies tests
 
 # Checks common spelling mistakes
