@@ -8,6 +8,8 @@ set -Eeuxo pipefail
 vpicc &
 sleep 2
 
+pcsc_scan -c
+
 export PINENTRY_PROGRAM=/app/scripts/fake-pinentry.sh
 echo 12345678 > admin-pin
 echo 123456 > user-pin
