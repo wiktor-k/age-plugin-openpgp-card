@@ -26,6 +26,10 @@ lints:
 
 # Checks for issues with dependencies
 dependencies:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # workaround for: https://github.com/EmbarkStudios/cargo-deny/issues/854
+    unset GIT_WORK_TREE
     cargo deny check
 
 # Runs all unit tests. By default ignored tests are not run. Run with `ignored=true` to run only ignored tests
