@@ -1,13 +1,14 @@
 #!/usr/bin/env -S just --working-directory . --justfile
 # Load project-specific properties from the `.env` file
 
-set dotenv-load := true
+set dotenv-load
 
 # Since this is a first recipe it's being run by default.
 # Faster checks need to be executed first for better UX.  For example
 # codespell is very fast. cargo fmt does not need to download crates etc.
 
 # Perform all checks
+[parallel]
 check: spelling formatting docs lints dependencies tests
 
 # Checks common spelling mistakes
@@ -26,6 +27,10 @@ lints:
 
 # Checks for issues with dependencies
 dependencies:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # workaround for: https://github.com/EmbarkStudios/cargo-deny/issues/854
+    unset GIT_WORK_TREE
     cargo deny check
 
 # Runs all unit tests. By default ignored tests are not run. Run with `ignored=true` to run only ignored tests

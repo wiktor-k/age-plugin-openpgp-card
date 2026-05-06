@@ -8,9 +8,12 @@ set -Eeuxo pipefail
 vpicc &
 sleep 2
 
+pcsc_scan -c
+
 export PINENTRY_PROGRAM=/app/scripts/fake-pinentry.sh
-echo 12345678 > admin-pin
-echo 123456 > user-pin
+echo -n 12345678 > admin-pin
+echo -n 123456 > user-pin
+oct list
 oct admin --card 0000:00000000 --admin-pin admin-pin generate --user-pin user-pin --output /tmp/no-need-for-this --userid 'No need for that' curve25519
 
 function roundtrip {
