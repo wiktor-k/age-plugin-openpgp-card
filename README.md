@@ -53,6 +53,7 @@ I like strawberries
 ```
 
 The plugin will ask you for the PIN using built-in plugin protocol (e.g. [`rage`](https://github.com/str4d/rage) would show a pin-entry prompt).
+If the card reader, or the device itself, has a pin pad, the PIN is entered there instead, so it never passes through the computer.
 
 ## Tests
 
