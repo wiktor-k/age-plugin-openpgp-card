@@ -20,3 +20,7 @@ openpgp-card = "0.7.0"
 subtle = "2.6.1"
 thiserror = "2.0.21"
 x25519-dalek = "3.0.0"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

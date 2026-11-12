@@ -50,8 +50,12 @@ impl PluginHandler for IdentityPlugin {
     }
 }
 
+type FileKeys = HashMap<usize, Result<FileKey, Vec<identity::Error>>>;
+
 #[derive(Debug)]
 struct CardStub {
+    /// Index of the identity, as assigned by the age client.
+    index: usize,
     ident: String,
 }
 
@@ -70,7 +74,7 @@ pub(crate) fn base64_arg<A: AsRef<[u8]>, const N: usize, const B: usize>(
 
     let mut buf = [0; B];
     match BASE64_STANDARD_NO_PAD.decode_slice(arg, buf.as_mut()) {
-        Ok(n) if n == N => Some(buf[..N].try_into().unwrap()),
+        Ok(n) if n == N => buf[..N].try_into().ok(),
         _ => None,
     }
 }
@@ -97,12 +101,13 @@ impl IdentityPlugin {
     fn unwrap_stanza<'a>(
         tx: &mut Card<Transaction<'a>>,
         ident: &str,
-        pk: &[u8],
+        pk: &[u8; 32],
         stanza: &Stanza,
         callbacks: &mut impl Callbacks<identity::Error>,
     ) -> Result<Option<FileKey>, Box<dyn std::error::Error>> {
         if stanza.tag != X25519_RECIPIENT_TAG {
-            return Err(std::io::Error::other("bad stanza tag").into());
+            // Stanzas for other recipient types are not ours: ignore them.
+            return Ok(None);
         }
 
         // Enforce valid and canonical stanza format.
@@ -114,20 +119,15 @@ impl IdentityPlugin {
             },
             _ => return Err(DecryptError::InvalidHeader.into()),
         };
-        if stanza.body.len() != ENCRYPTED_FILE_KEY_BYTES {
-            return Err(DecryptError::InvalidHeader.into());
-        }
-
-        let epk: PublicKey = ephemeral_share.into();
         let encrypted_file_key: [u8; ENCRYPTED_FILE_KEY_BYTES] = stanza.body[..]
             .try_into()
-            .expect("Length should have been checked above");
+            .map_err(|_| DecryptError::InvalidHeader)?;
+
+        let epk: PublicKey = ephemeral_share.into();
 
         if let Ok(Some(uif)) = tx.user_interaction_flag(Decryption) {
             if uif.touch_policy().touch_required() {
-                callbacks
-                    .message(&format!("Touch your card {ident} now to decrypt.",))?
-                    .unwrap();
+                callbacks.message(&format!("Touch your card {ident} now to decrypt."))??;
             }
         };
 
@@ -150,19 +150,75 @@ impl IdentityPlugin {
         // A failure to decrypt is non-fatal (we try to decrypt the recipient
         // stanza with other X25519 keys), because we cannot tell which key
         // matches a particular stanza.
-        if let Some(result) = aead_decrypt(&enc_key, FILE_KEY_BYTES, &encrypted_file_key)
-            .ok()
-            .map(|mut pt| {
-                // It's ours!
-                let file_key: [u8; FILE_KEY_BYTES] = pt[..].try_into().unwrap();
-                pt.zeroize();
-                FileKey::new(Box::new(file_key))
-            })
-        {
-            return Ok(Some(result));
+        if let Ok(mut pt) = aead_decrypt(&enc_key, FILE_KEY_BYTES, &encrypted_file_key) {
+            // It's ours!
+            let file_key: Result<[u8; FILE_KEY_BYTES], _> = pt[..].try_into();
+            pt.zeroize();
+            let file_key = file_key.map_err(|_| DecryptError::InvalidHeader)?;
+            return Ok(Some(FileKey::new(Box::new(file_key))));
         }
 
         Ok(None)
+    }
+
+    /// Tries to unwrap the file keys using a single card.
+    ///
+    /// Keys are added to `file_keys`; files that already have a key are not
+    /// tried again. The card is skipped if the user declined to insert it, or
+    /// if it does not hold an X25519 decryption key.
+    fn unwrap_with_card(
+        card_stub: &CardStub,
+        files: &[Vec<Stanza>],
+        file_keys: &mut FileKeys,
+        callbacks: &mut impl Callbacks<identity::Error>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let ident = card_stub.ident.as_str();
+        let mut card = loop {
+            if let Some(card) = Self::get_card(ident)? {
+                break card;
+            }
+            if !callbacks.confirm(&format!("Please insert card {ident}"), "OK", None)?? {
+                return Ok(());
+            }
+        };
+
+        let mut tx = card.transaction()?;
+        let pk: [u8; 32] = match tx.public_key_material(Decryption)? {
+            PublicKeyMaterial::E(ecc) => match ecc.data().try_into() {
+                Ok(pk) => pk,
+                Err(_) => return Ok(()),
+            },
+            _ => return Ok(()),
+        };
+
+        // Prefer the reader's (or device's) own PIN entry: the PIN then never
+        // passes through the host, where a keylogger could record it.
+        if tx.feature_pinpad_verify() {
+            callbacks.message(&format!("Enter the PIN of card {ident} on its pin pad"))??;
+            tx.verify_user_pinpad(&|| {})?;
+        } else {
+            tx.verify_user_pin(callbacks.request_secret(&format!("Unlock card {ident}"))??)?;
+        }
+
+        for (file_index, stanzas) in files.iter().enumerate() {
+            if file_keys.contains_key(&file_index) {
+                continue;
+            }
+            for stanza in stanzas {
+                // Stanzas that fail to unwrap are skipped: they may be addressed
+                // to other recipients.
+                if let Ok(Some(file_key)) =
+                    Self::unwrap_stanza(&mut tx, ident, &pk, stanza, callbacks)
+                {
+                    file_keys.insert(file_index, Ok(file_key));
+                    // The remaining stanzas would only cost further card
+                    // operations (and touches).
+                    break;
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -175,6 +231,7 @@ impl IdentityPluginV1 for IdentityPlugin {
     ) -> Result<(), identity::Error> {
         if plugin_name == PLUGIN_NAME {
             self.cards.push(CardStub {
+                index,
                 ident: String::from_utf8_lossy(bytes).to_string(),
             });
             Ok(())
@@ -190,69 +247,35 @@ impl IdentityPluginV1 for IdentityPlugin {
         &mut self,
         files: Vec<Vec<Stanza>>,
         mut callbacks: impl Callbacks<identity::Error>,
-    ) -> io::Result<HashMap<usize, Result<FileKey, Vec<identity::Error>>>> {
-        'cards: for card_stub in self.cards.iter() {
-            let ident = card_stub.ident.as_str();
-            let mut card = loop {
-                let car = Self::get_card(&card_stub.ident).unwrap();
-                if let Some(card) = car {
-                    break card;
-                } else {
-                    let res = callbacks
-                        .confirm(&format!("Please insert card {}", ident), "OK", None)?
-                        .unwrap();
-                    if !res {
-                        continue 'cards;
-                    };
-                }
-            };
-
-            let mut tx = card.transaction().unwrap();
-            let pk: Vec<u8> =
-                if let PublicKeyMaterial::E(ecc) = tx.public_key_material(Decryption).unwrap() {
-                    ecc.data().into()
-                } else {
-                    //return Err(DecryptError::NonEccCard.into());
-                    continue 'cards;
-                };
-
-            // Prefer the reader's (or device's) own PIN entry: the PIN then never
-            // passes through the host, where a keylogger could record it.
-            if tx.feature_pinpad_verify() {
-                callbacks
-                    .message(&format!("Enter the PIN of card {ident} on its pin pad"))?
-                    .unwrap();
-                tx.verify_user_pinpad(&|| {}).unwrap();
-            } else {
-                tx.verify_user_pin(
-                    callbacks
-                        .request_secret(&format!("Unlock card {}", ident))?
-                        .unwrap(),
-                )
-                .unwrap();
+    ) -> io::Result<FileKeys> {
+        let mut file_keys = FileKeys::with_capacity(files.len());
+        let mut errors = vec![];
+        for card_stub in &self.cards {
+            if file_keys.len() == files.len() {
+                // Nothing left to unwrap: do not bother the user with more cards.
+                break;
             }
-            let mut file_keys = HashMap::with_capacity(files.len());
-            for (file_index, stanzas) in files.iter().enumerate() {
-                for (stanza_index, stanza) in stanzas.iter().enumerate() {
-                    if let Ok(Some(file_key)) =
-                        Self::unwrap_stanza(&mut tx, ident, &pk, stanza, &mut callbacks).map_err(
-                            |e| {
-                                vec![identity::Error::Stanza {
-                                    file_index,
-                                    stanza_index,
-                                    message: e.to_string(),
-                                }]
-                            },
-                        )
-                    {
-                        file_keys.entry(file_index).or_insert(Ok(file_key));
-                    }
-                }
+            if let Err(e) =
+                Self::unwrap_with_card(card_stub, &files, &mut file_keys, &mut callbacks)
+            {
+                // Remember the failure and give the remaining cards a chance.
+                errors.push(identity::Error::Identity {
+                    index: card_stub.index,
+                    message: format!("card {}: {e}", card_stub.ident),
+                });
             }
-
-            return Ok(file_keys);
         }
-        Ok(Default::default())
+
+        // Report card failures to the age client only if they may be the reason
+        // a file could not be unwrapped. Identity errors are not tied to a file,
+        // so they are attached to the first file that is still missing its key.
+        if !errors.is_empty() {
+            if let Some(file_index) = (0..files.len()).find(|i| !file_keys.contains_key(i)) {
+                file_keys.insert(file_index, Err(errors));
+            }
+        }
+
+        Ok(file_keys)
     }
 }
 
