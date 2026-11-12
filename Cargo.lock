@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "age-plugin-openpgp-card"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "age-core",
  "age-plugin",
