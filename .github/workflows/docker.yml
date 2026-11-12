@@ -32,4 +32,5 @@ jobs:
           platforms: linux/amd64
           # see: https://blacksmith.sh/blog/cache-is-king-a-guide-for-docker-layer-caching-in-github-actions
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
+          # PRs from forks get a read-only token, so only pushes update the cache
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}:buildcache,mode=max', github.repository) || '' }}
