@@ -163,20 +163,22 @@ impl IdentityPlugin {
 
     /// Tries to unwrap the file keys using a single card.
     ///
-    /// Returns `Ok(None)` if the card should be skipped: the user declined to
-    /// insert it, or it does not hold an X25519 decryption key.
+    /// Keys are added to `file_keys`; files that already have a key are not
+    /// tried again. The card is skipped if the user declined to insert it, or
+    /// if it does not hold an X25519 decryption key.
     fn unwrap_with_card(
         card_stub: &CardStub,
         files: &[Vec<Stanza>],
+        file_keys: &mut FileKeys,
         callbacks: &mut impl Callbacks<identity::Error>,
-    ) -> Result<Option<FileKeys>, Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let ident = card_stub.ident.as_str();
         let mut card = loop {
             if let Some(card) = Self::get_card(ident)? {
                 break card;
             }
             if !callbacks.confirm(&format!("Please insert card {ident}"), "OK", None)?? {
-                return Ok(None);
+                return Ok(());
             }
         };
 
@@ -184,9 +186,9 @@ impl IdentityPlugin {
         let pk: [u8; 32] = match tx.public_key_material(Decryption)? {
             PublicKeyMaterial::E(ecc) => match ecc.data().try_into() {
                 Ok(pk) => pk,
-                Err(_) => return Ok(None),
+                Err(_) => return Ok(()),
             },
-            _ => return Ok(None),
+            _ => return Ok(()),
         };
 
         // Prefer the reader's (or device's) own PIN entry: the PIN then never
@@ -198,8 +200,10 @@ impl IdentityPlugin {
             tx.verify_user_pin(callbacks.request_secret(&format!("Unlock card {ident}"))??)?;
         }
 
-        let mut file_keys = HashMap::with_capacity(files.len());
         for (file_index, stanzas) in files.iter().enumerate() {
+            if file_keys.contains_key(&file_index) {
+                continue;
+            }
             for stanza in stanzas {
                 // Stanzas that fail to unwrap are skipped: they may be addressed
                 // to other recipients.
@@ -214,7 +218,7 @@ impl IdentityPlugin {
             }
         }
 
-        Ok(Some(file_keys))
+        Ok(())
     }
 }
 
@@ -244,22 +248,34 @@ impl IdentityPluginV1 for IdentityPlugin {
         files: Vec<Vec<Stanza>>,
         mut callbacks: impl Callbacks<identity::Error>,
     ) -> io::Result<FileKeys> {
+        let mut file_keys = FileKeys::with_capacity(files.len());
+        let mut errors = vec![];
         for card_stub in &self.cards {
-            match Self::unwrap_with_card(card_stub, &files, &mut callbacks) {
-                Ok(Some(file_keys)) => return Ok(file_keys),
-                Ok(None) => continue,
-                Err(e) => {
-                    // Report the failure to the age client instead of aborting.
-                    // Identity errors are not tied to a file, so send it once.
-                    let error = identity::Error::Identity {
-                        index: card_stub.index,
-                        message: format!("card {}: {e}", card_stub.ident),
-                    };
-                    return Ok(HashMap::from([(0, Err(vec![error]))]));
-                }
+            if file_keys.len() == files.len() {
+                // Nothing left to unwrap: do not bother the user with more cards.
+                break;
+            }
+            if let Err(e) =
+                Self::unwrap_with_card(card_stub, &files, &mut file_keys, &mut callbacks)
+            {
+                // Remember the failure and give the remaining cards a chance.
+                errors.push(identity::Error::Identity {
+                    index: card_stub.index,
+                    message: format!("card {}: {e}", card_stub.ident),
+                });
             }
         }
-        Ok(Default::default())
+
+        // Report card failures to the age client only if they may be the reason
+        // a file could not be unwrapped. Identity errors are not tied to a file,
+        // so they are attached to the first file that is still missing its key.
+        if !errors.is_empty() {
+            if let Some(file_index) = (0..files.len()).find(|i| !file_keys.contains_key(i)) {
+                file_keys.insert(file_index, Err(errors));
+            }
+        }
+
+        Ok(file_keys)
     }
 }
 
