@@ -235,12 +235,21 @@ impl IdentityPluginV1 for IdentityPlugin {
                     continue 'cards;
                 };
 
-            tx.verify_user_pin(
+            // Prefer the reader's (or device's) own PIN entry: the PIN then never
+            // passes through the host, where a keylogger could record it.
+            if tx.feature_pinpad_verify() {
                 callbacks
-                    .request_secret(&format!("Unlock card {}", ident))?
-                    .unwrap(),
-            )
-            .unwrap();
+                    .message(&format!("Enter the PIN of card {ident} on its pin pad"))?
+                    .unwrap();
+                tx.verify_user_pinpad(&|| {}).unwrap();
+            } else {
+                tx.verify_user_pin(
+                    callbacks
+                        .request_secret(&format!("Unlock card {}", ident))?
+                        .unwrap(),
+                )
+                .unwrap();
+            }
             let mut file_keys = HashMap::with_capacity(files.len());
             for (file_index, stanzas) in files.iter().enumerate() {
                 for (stanza_index, stanza) in stanzas.iter().enumerate() {
