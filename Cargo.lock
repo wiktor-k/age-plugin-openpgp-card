@@ -83,7 +83,6 @@ dependencies = [
  "subtle",
  "thiserror 2.0.21",
  "x25519-dalek",
- "zeroize",
 ]
 
 [[package]]
