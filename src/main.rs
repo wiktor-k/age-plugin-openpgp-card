@@ -106,7 +106,8 @@ impl IdentityPlugin {
         callbacks: &mut impl Callbacks<identity::Error>,
     ) -> Result<Option<FileKey>, Box<dyn std::error::Error>> {
         if stanza.tag != X25519_RECIPIENT_TAG {
-            return Err(std::io::Error::other("bad stanza tag").into());
+            // Stanzas for other recipient types are not ours: ignore them.
+            return Ok(None);
         }
 
         // Enforce valid and canonical stanza format.
