@@ -206,7 +206,10 @@ impl IdentityPlugin {
                 if let Ok(Some(file_key)) =
                     Self::unwrap_stanza(&mut tx, ident, &pk, stanza, callbacks)
                 {
-                    file_keys.entry(file_index).or_insert(Ok(file_key));
+                    file_keys.insert(file_index, Ok(file_key));
+                    // The remaining stanzas would only cost further card
+                    // operations (and touches).
+                    break;
                 }
             }
         }
