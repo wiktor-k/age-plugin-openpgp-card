@@ -9,12 +9,11 @@ use age_core::{
 };
 use age_core::{
     format::{FileKey, Stanza},
-    secrecy::Zeroize as _,
+    secrecy::zeroize::Zeroize as _,
 };
 use age_plugin::{
     identity::{self, IdentityPluginV1},
-    recipient::{self, RecipientPluginV1},
-    run_state_machine, Callbacks,
+    run_state_machine, Callbacks, PluginHandler,
 };
 use bech32::{Bech32, Hrp};
 use card_backend_pcsc::PcscBackend;
@@ -40,33 +39,14 @@ const X25519_RECIPIENT_KEY_LABEL: &[u8] = b"age-encryption.org/v1/X25519";
 
 pub const EPK_LEN_BYTES: usize = 32;
 pub const ENCRYPTED_FILE_KEY_BYTES: usize = FILE_KEY_BYTES + 16;
-struct RecipientPlugin;
 
-impl RecipientPluginV1 for RecipientPlugin {
-    fn add_recipient(
-        &mut self,
-        _index: usize,
-        _plugin_name: &str,
-        _bytes: &[u8],
-    ) -> Result<(), recipient::Error> {
-        todo!()
-    }
+impl PluginHandler for IdentityPlugin {
+    type RecipientV1 = std::convert::Infallible;
 
-    fn add_identity(
-        &mut self,
-        _index: usize,
-        _plugin_name: &str,
-        _bytes: &[u8],
-    ) -> Result<(), recipient::Error> {
-        todo!()
-    }
+    type IdentityV1 = IdentityPlugin;
 
-    fn wrap_file_keys(
-        &mut self,
-        _file_keys: Vec<FileKey>,
-        _callbacks: impl Callbacks<recipient::Error>,
-    ) -> io::Result<Result<Vec<Vec<Stanza>>, Vec<recipient::Error>>> {
-        todo!()
+    fn identity_v1(self) -> io::Result<Self::IdentityV1> {
+        Ok(self)
     }
 }
 
@@ -75,6 +55,7 @@ struct CardStub {
     ident: String,
 }
 
+#[derive(Debug, Default)]
 struct IdentityPlugin {
     cards: Vec<CardStub>,
 }
@@ -175,7 +156,7 @@ impl IdentityPlugin {
                 // It's ours!
                 let file_key: [u8; FILE_KEY_BYTES] = pt[..].try_into().unwrap();
                 pt.zeroize();
-                FileKey::from(file_key)
+                FileKey::new(Box::new(file_key))
             })
         {
             return Ok(Some(result));
@@ -287,8 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(state_machine) = opts.age_plugin {
         return Ok(run_state_machine(
             &state_machine,
-            Some(|| RecipientPlugin),
-            Some(|| IdentityPlugin { cards: vec![] }),
+            IdentityPlugin::default(),
         )?);
     }
 
